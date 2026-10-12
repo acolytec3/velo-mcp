@@ -18,6 +18,30 @@ npm start        # runs dist/index.js over stdio
 
 Point an MCP client (Claude Desktop, Cursor, etc.) at `node /path/to/velo-mcp/dist/index.js`.
 
+## Dump script
+
+A standalone CLI for pulling data to a file without going through MCP, reusing the same client/catalog code:
+
+```bash
+npm run dump -- --ticker <TICKER> --timeframe <1m|5m|15m|1h|4h|1d> --lookback <duration|ISO date> \
+  [--indicator <name-or-metric>] [--view <view>] [--unit Dollars|Coins] \
+  [--exchange <anchor-exchange>] [--exchanges ex1,ex2,...] [--format csv|json] [--out <path>]
+```
+
+`--lookback` accepts `<number><unit>` with unit in `{h, d, w, mo, y}` (e.g. `90d`, `6mo`, `1y`), or a plain ISO date to use as the begin time directly. `--indicator` accepts a catalog display name (`"Aggregated Open Interest"`), a study id (`aggregated-open-interest`), or a raw metric key (`open_interest`, `volume`, etc.) — omit it to dump plain OHLCV price. Output defaults to `dumps/velo-<ticker>-<metric>-<timeframe>-<timestamp>.csv`, created automatically; `dumps/` is gitignored.
+
+Examples:
+
+```bash
+npm run dump -- --ticker BTCUSDT --timeframe 1h --lookback 90d
+npm run dump -- --ticker NEARUSDT --timeframe 5m --lookback 7d --indicator "Aggregated Open Interest"
+npm run dump -- --ticker NEARUSDT --timeframe 1h --lookback 1y --indicator volume --view "Cumulative Delta" --unit Coins
+npm run dump -- --ticker NEARUSDT --timeframe 5m --lookback 2d --indicator premium --exchange coinbase
+npm run dump -- --list-indicators
+```
+
+Price-derived overlays with no separate API metric (Moving Average, Realized Vol, Returns, Total Return) aren't supported as `--indicator` values — you'll get a clear error pointing you to drop `--indicator` and compute them from the dumped price series yourself.
+
 ## How the underlying API works
 
 Everything hangs off one endpoint:

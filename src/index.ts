@@ -9,48 +9,17 @@ import {
   TIMEFRAME_TO_MINUTES,
   MAX_BARS_PER_REQUEST,
   EARLIEST_AVAILABLE_DATA,
+  ALL_METRICS,
+  defaultExchangesForMetric,
+  defaultViewForMetric,
   type Metric,
   type Unit,
 } from "./catalog.js";
 import { buildCompoundSymbol, fetchRange, normalizeRows } from "./veloClient.js";
 
 const TIMEFRAMES = Object.keys(TIMEFRAME_TO_MINUTES) as [string, ...string[]];
-const METRICS: [Metric, ...Metric[]] = [
-  "open_interest",
-  "volume",
-  "spotvol",
-  "liquidations",
-  "funding_rate",
-  "cross_exchange_funding",
-  "premium",
-  "tape",
-  "spottape",
-];
+const METRICS = ALL_METRICS as [Metric, ...Metric[]];
 const UNITS: [Unit, ...Unit[]] = ["Dollars", "Coins"];
-
-function defaultExchangesFor(metric: Metric): readonly string[] {
-  if (metric === "spotvol" || metric === "spottape") return SPOT_EXCHANGES;
-  return DERIVATIVES_EXCHANGES;
-}
-
-function defaultViewFor(metric: Metric): string {
-  switch (metric) {
-    case "open_interest":
-      return "Candles";
-    case "volume":
-    case "spotvol":
-      return "Cumulative Delta";
-    case "liquidations":
-      return "Standard";
-    case "funding_rate":
-    case "cross_exchange_funding":
-    case "premium":
-      return "Average";
-    case "tape":
-    case "spottape":
-      return "Trade Count";
-  }
-}
 
 const server = new McpServer({ name: "velo-mcp", version: "0.1.0" });
 
@@ -170,8 +139,8 @@ server.registerTool(
     }),
   },
   async ({ ticker, metric, exchanges, unit, view, timeframe, begin, end, anchorExchange }) => {
-    const resolvedExchanges = exchanges ?? defaultExchangesFor(metric as Metric);
-    const resolvedView = view ?? defaultViewFor(metric as Metric);
+    const resolvedExchanges = exchanges ?? defaultExchangesForMetric(metric as Metric);
+    const resolvedView = view ?? defaultViewForMetric(metric as Metric);
 
     const symbol = buildCompoundSymbol({
       ticker,

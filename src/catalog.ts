@@ -318,3 +318,45 @@ export function findIndicator(nameOrStudyId: string): IndicatorDef | undefined {
     (i) => i.studyId.toLowerCase() === needle || i.name.toLowerCase() === needle
   );
 }
+
+export const ALL_METRICS: Metric[] = [
+  "open_interest",
+  "volume",
+  "spotvol",
+  "liquidations",
+  "funding_rate",
+  "cross_exchange_funding",
+  "premium",
+  "tape",
+  "spottape",
+];
+
+/** Standard exchange set Velo's own "Aggregated"/cross-exchange studies
+ * combine for a given metric, used as the default when a caller doesn't
+ * specify `exchanges` explicitly. */
+export function defaultExchangesForMetric(metric: Metric): readonly string[] {
+  if (metric === "spotvol" || metric === "spottape") return SPOT_EXCHANGES;
+  if (metric === "cross_exchange_funding") return CROSS_EXCHANGE_FUNDING_EXCHANGES;
+  return DERIVATIVES_EXCHANGES;
+}
+
+/** The chart view this metric is typically displayed with, used as the
+ * default when a caller doesn't specify `view` explicitly. */
+export function defaultViewForMetric(metric: Metric): string {
+  switch (metric) {
+    case "open_interest":
+      return "Candles";
+    case "volume":
+    case "spotvol":
+      return "Cumulative Delta";
+    case "liquidations":
+      return "Standard";
+    case "funding_rate":
+    case "cross_exchange_funding":
+    case "premium":
+      return "Average";
+    case "tape":
+    case "spottape":
+      return "Trade Count";
+  }
+}
