@@ -105,6 +105,19 @@ export interface FetchRangeArgs {
   /** Safety limit on how many chunked requests a single call may fan out
    * into before erroring. Default 50 (~50 * 450 = 22,500 bars). */
   maxChunks?: number;
+  /** How many chunk requests may be in flight at once when paginating.
+   * Default 5. Set to 1 (combined with `requestDelayMs`) for strict
+   * rate-limiting, e.g. bulk/backfill pulls where avoiding a burst matters
+   * more than wall-clock time. */
+  concurrency?: number;
+  /** Extra delay (ms) each worker waits after a chunk request completes
+   * before starting its next one. Default 0 (no throttling). With
+   * `concurrency: 1`, `requestDelayMs: 1000` yields ~1 request/second. */
+  requestDelayMs?: number;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 /**
@@ -160,7 +173,8 @@ export async function fetchRange(args: FetchRangeArgs): Promise<RangeResponse> {
     windows.push({ begin: cBegin, end: cEnd });
   }
 
-  const CONCURRENCY = 5;
+  const concurrency = Math.max(1, args.concurrency ?? 5);
+  const requestDelayMs = args.requestDelayMs ?? 0;
   const results: RangeResponse[] = new Array(windows.length);
   let nextIndex = 0;
   async function worker() {
@@ -173,9 +187,10 @@ export async function fetchRange(args: FetchRangeArgs): Promise<RangeResponse> {
         beginMs: windows[i].begin,
         endMs: windows[i].end,
       });
+      if (requestDelayMs > 0 && nextIndex < windows.length) await sleep(requestDelayMs);
     }
   }
-  await Promise.all(Array.from({ length: Math.min(CONCURRENCY, windows.length) }, worker));
+  await Promise.all(Array.from({ length: Math.min(concurrency, windows.length) }, worker));
 
   const byTime = new Map<number, number[]>();
   for (const chunk of results) {

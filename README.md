@@ -25,10 +25,13 @@ A standalone CLI for pulling data to a file without going through MCP, reusing t
 ```bash
 npm run dump -- --ticker <TICKER> --timeframe <1m|5m|15m|1h|4h|1d> --lookback <duration|ISO date> \
   [--indicator <name-or-metric>] [--view <view>] [--unit Dollars|Coins] \
-  [--exchange <anchor-exchange>] [--exchanges ex1,ex2,...] [--format csv|json] [--out <path>]
+  [--exchange <anchor-exchange>] [--exchanges ex1,ex2,...] [--format csv|json] [--out <path>] \
+  [--concurrency <n>] [--delay-ms <n>]
 ```
 
-`--lookback` accepts `<number><unit>` with unit in `{h, d, w, mo, y}` (e.g. `90d`, `6mo`, `1y`), or a plain ISO date to use as the begin time directly. `--indicator` accepts a catalog display name (`"Aggregated Open Interest"`), a study id (`aggregated-open-interest`), or a raw metric key (`open_interest`, `volume`, etc.) — omit it to dump plain OHLCV price. Output defaults to `dumps/velo-<ticker>-<metric>-<timeframe>-<timestamp>.csv`, created automatically; `dumps/` is gitignored.
+`--lookback` accepts `<number><unit>` with unit in `{h, d, w, mo, y}` (e.g. `90d`, `6mo`, `1y`), or a plain ISO date to use as the begin time directly. `--indicator` accepts a catalog display name (`"Aggregated Open Interest"`), a study id (`aggregated-open-interest`), or a raw metric key (`open_interest`, `volume`, etc.) — omit it to dump plain OHLCV price. Output defaults to `dumps/velo-<ticker>-<metric>-<timeframe>-<timestamp>.csv`; pass `--out` for a custom path. Both `dumps/` and `data/` are gitignored — dumped data is local scratch output, not committed to the repo.
+
+`--concurrency` (default 5) and `--delay-ms` (default 0) control how pagination behaves once a range needs more than one chunk request (see the per-request cap below). For large backfills where avoiding a burst matters more than wall-clock time, use `--concurrency 1 --delay-ms 1000` for a strict ~1 request/second pace.
 
 Examples:
 
@@ -37,6 +40,7 @@ npm run dump -- --ticker BTCUSDT --timeframe 1h --lookback 90d
 npm run dump -- --ticker NEARUSDT --timeframe 5m --lookback 7d --indicator "Aggregated Open Interest"
 npm run dump -- --ticker NEARUSDT --timeframe 1h --lookback 1y --indicator volume --view "Cumulative Delta" --unit Coins
 npm run dump -- --ticker NEARUSDT --timeframe 5m --lookback 2d --indicator premium --exchange coinbase
+npm run dump -- --ticker BTCUSDT --timeframe 5m --lookback 1mo --indicator "Aggregated Spot Volume" --concurrency 1 --delay-ms 1000 --out data/btc/aggregated-spot-volume-5m-1mo.csv
 npm run dump -- --list-indicators
 ```
 

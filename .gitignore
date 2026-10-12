@@ -1,5 +1,8 @@
 node_modules/
 dist/
-dumps/
 *.log
 .env
+
+# CLI output from `npm run dump` - local scratch/working data, not committed.
+dumps/
+data/

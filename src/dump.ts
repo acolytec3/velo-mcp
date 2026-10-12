@@ -43,6 +43,8 @@ interface ParsedArgs {
   exchanges?: string[];
   format: "csv" | "json";
   out?: string;
+  concurrency: number;
+  delayMs: number;
 }
 
 function printUsageAndExit(message?: string): never {
@@ -50,7 +52,13 @@ function printUsageAndExit(message?: string): never {
   console.error(`Usage:
   npm run dump -- --ticker <TICKER> --timeframe <1m|5m|15m|1h|4h|1d> --lookback <duration|ISO date> \\
     [--indicator <name-or-metric>] [--view <view>] [--unit Dollars|Coins] \\
-    [--exchange <anchor-exchange>] [--exchanges ex1,ex2,...] [--format csv|json] [--out <path>]
+    [--exchange <anchor-exchange>] [--exchanges ex1,ex2,...] [--format csv|json] [--out <path>] \\
+    [--concurrency <n>] [--delay-ms <n>]
+
+--concurrency (default 5) caps how many chunk requests run in parallel when a range
+needs pagination. --delay-ms (default 0) adds a pause after each chunk completes before
+the next starts. Use "--concurrency 1 --delay-ms 1000" for a strict ~1 request/second
+rate limit on large backfills.
 
 --lookback accepts "<number><unit>" with unit in {h, d, w, mo, y} (e.g. "90d", "6mo", "1y"),
 or a plain ISO date (e.g. "2024-01-01") to use as the begin time directly.
@@ -64,6 +72,7 @@ Examples:
   npm run dump -- --ticker NEARUSDT --timeframe 5m --lookback 7d --indicator "Aggregated Open Interest"
   npm run dump -- --ticker NEARUSDT --timeframe 1h --lookback 1y --indicator volume --view "Cumulative Delta" --unit Coins
   npm run dump -- --ticker NEARUSDT --timeframe 5m --lookback 2d --indicator premium --exchange coinbase
+  npm run dump -- --ticker BTCUSDT --timeframe 5m --lookback 1mo --indicator "Aggregated Spot Volume" --concurrency 1 --delay-ms 1000
   npm run dump -- --list-indicators
 `);
   process.exit(1);
@@ -114,6 +123,8 @@ function parseArgs(argv: string[]): ParsedArgs {
     exchanges: exchangesRaw ? exchangesRaw.split(",").map((s) => s.trim()).filter(Boolean) : undefined,
     format: (map.get("format") as "csv" | "json") || "csv",
     out: map.get("out"),
+    concurrency: map.has("concurrency") ? parseInt(map.get("concurrency")!, 10) : 5,
+    delayMs: map.has("delay-ms") ? parseInt(map.get("delay-ms")!, 10) : 0,
   };
 }
 
@@ -207,6 +218,8 @@ async function main() {
     timeframe: args.timeframe,
     begin: beginMs,
     end: endMs,
+    concurrency: args.concurrency,
+    requestDelayMs: args.delayMs,
   });
   const rows = normalizeRows(raw.arr);
 
