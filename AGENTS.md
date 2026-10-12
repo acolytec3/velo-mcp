@@ -58,7 +58,11 @@ A single request is capped at **~459–460 bars**, independent of resolution (co
 
 This cap might be tier-specific (observed account was tier 0 / free per its JWT). If you're testing from a paid account and find a different cap, update `MAX_BARS_PER_REQUEST` and this doc.
 
-### Historical floor — THE #3 GOTCHA
+### "Cumulative" views don't actually accumulate server-side — THE #3 GOTCHA
+
+A/B-confirmed by requesting `view=Delta`, `view=Cumulative Delta`, and `view=Cumulative Delta (Candles)` for the same metric/range: **all three return byte-identical raw per-bar delta data**. The `view` segment of the compound symbol has no effect on what `/api/m/range` sends back for these. The smoothly running-total line you see on the live chart for "Cumulative Delta" is accumulated **client-side** by the TradingView study — never trust raw "Cumulative ..." API output as already-summed; it isn't. `isCumulativeView()` / `cumulativeSum()` / `applyCumulativeIfRequested()` in `veloClient.ts` reproduce that accumulation locally, and both `index.ts` (`velo_get_indicator`) and `dump.ts` apply it automatically whenever `view` matches `/cumulative/i`. If you add new call sites that fetch a "Cumulative ..." view, route through `applyCumulativeIfRequested()` rather than assuming the API already did it.
+
+### Historical floor — THE #4 GOTCHA
 
 Data has a hard floor at **`2021-01-01T00:00:00Z`**, confirmed identical across every exchange tested (Binance, Bybit, OKX, Deribit, Coinbase) via binary search — it stops dead, not a gradual taper. This is Velo's own data-collection start date, **not** when the underlying exchange/instrument actually launched (e.g. real Binance BTCUSDT perp history goes back to Sept 2019, Velo has none of it before 2021-01-01). Hyperliquid has nothing this far back since it launched in 2023 — don't mistake that for a bug. `EARLIEST_AVAILABLE_DATA` in `catalog.ts`; `fetchRange()` clamps `begin` to it silently rather than erroring.
 

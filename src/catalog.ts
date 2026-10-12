@@ -68,6 +68,20 @@ export const MAX_BARS_PER_REQUEST = 450;
  */
 export const EARLIEST_AVAILABLE_DATA = "2021-01-01T00:00:00.000Z";
 
+/**
+ * Live-confirmed via a direct A/B comparison (2026-10-12): for `spotvol`
+ * (and presumably `volume`/`tape`), requesting `view=Delta`,
+ * `view=Cumulative Delta`, and `view=Cumulative Delta (Candles)` all return
+ * byte-identical raw per-bar delta data from `/api/m/range` - the `view`
+ * segment of the compound symbol has NO effect on the server response for
+ * these. The running-total line the live chart renders for "Cumulative
+ * Delta" is computed client-side by the TradingView study, not by the API.
+ * See `isCumulativeView` / `cumulativeSum` in veloClient.ts, which both
+ * `index.ts` and `dump.ts` use to reproduce that client-side accumulation
+ * so callers get data that actually matches the chart.
+ */
+export const CUMULATIVE_VIEWS_ARE_COMPUTED_CLIENT_SIDE = true;
+
 /** The 8 derivatives venues combined for every "Aggregated <metric>" study
  * (open interest, volume, liquidations, funding, premium, tape). */
 export const DERIVATIVES_EXCHANGES = [

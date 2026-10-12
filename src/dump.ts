@@ -30,7 +30,15 @@ import {
   type Metric,
   type Unit,
 } from "./catalog.js";
-import { buildCompoundSymbol, fetchRange, normalizeRows, type Candle, type Point } from "./veloClient.js";
+import {
+  buildCompoundSymbol,
+  fetchRange,
+  normalizeRows,
+  applyCumulativeIfRequested,
+  isCumulativeView,
+  type Candle,
+  type Point,
+} from "./veloClient.js";
 
 interface ParsedArgs {
   ticker: string;
@@ -221,12 +229,21 @@ async function main() {
     concurrency: args.concurrency,
     requestDelayMs: args.delayMs,
   });
-  const rows = normalizeRows(raw.arr);
+  let rows = normalizeRows(raw.arr);
 
   console.error(
     `Got ${rows.length} rows (server range ${raw.begin} .. ${raw.end}).` +
       (rows.length === 0 ? " No data - check the ticker/exchange/indicator combination." : "")
   );
+
+  if (viewUsed && isCumulativeView(viewUsed)) {
+    console.error(
+      `Note: velo.xyz's API returns raw per-bar delta for "${viewUsed}" - it does NOT pre-accumulate ` +
+        `server-side (the running total you see on the live chart is computed client-side by TradingView). ` +
+        `Applying a running cumulative sum locally to match what the chart actually displays.`
+    );
+    rows = applyCumulativeIfRequested(rows, viewUsed);
+  }
 
   const safeMetric = metricLabel.replace(/[^a-z0-9]+/gi, "-").toLowerCase();
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");

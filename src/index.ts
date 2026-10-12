@@ -15,7 +15,7 @@ import {
   type Metric,
   type Unit,
 } from "./catalog.js";
-import { buildCompoundSymbol, fetchRange, normalizeRows } from "./veloClient.js";
+import { buildCompoundSymbol, fetchRange, normalizeRows, applyCumulativeIfRequested, isCumulativeView } from "./veloClient.js";
 
 const TIMEFRAMES = Object.keys(TIMEFRAME_TO_MINUTES) as [string, ...string[]];
 const METRICS = ALL_METRICS as [Metric, ...Metric[]];
@@ -106,7 +106,7 @@ server.registerTool(
   {
     title: "Get Velo aggregated indicator series",
     description:
-      "Fetch a Velo chart indicator series (open interest, volume, spot volume, liquidations, funding, premium, or tape), optionally aggregated across multiple exchanges, from velo.xyz's internal chart data API. Call velo_list_indicators first to see valid metric/view/exchange combinations. Only metric=open_interest with view=Candles, and metric in {volume, spotvol} with view='Cumulative Delta', have been live-verified; other view values are inferred from the frontend and may need adjustment.",
+      "Fetch a Velo chart indicator series (open interest, volume, spot volume, liquidations, funding, premium, or tape), optionally aggregated across multiple exchanges, from velo.xyz's internal chart data API. Call velo_list_indicators first to see valid metric/view/exchange combinations. Only metric=open_interest with view=Candles, and metric in {volume, spotvol} with view='Cumulative Delta', have been live-verified; other view values are inferred from the frontend and may need adjustment. Note: for any 'Cumulative ...' view, velo.xyz's raw API only ever returns per-bar delta (Delta and Cumulative Delta are byte-identical server responses) - this tool locally accumulates it into a running total so the result actually matches what the live chart displays.",
     inputSchema: z.object({
       ticker: z.string().describe('Instrument symbol, e.g. "NEARUSDT".'),
       metric: z.enum(METRICS).describe("Which indicator metric to fetch."),
@@ -157,7 +157,9 @@ server.registerTool(
       begin,
       end,
     });
-    const series = normalizeRows(raw.arr);
+    let series = normalizeRows(raw.arr);
+    const cumulativeApplied = isCumulativeView(resolvedView);
+    if (cumulativeApplied) series = applyCumulativeIfRequested(series, resolvedView);
 
     return {
       content: [
@@ -174,6 +176,9 @@ server.registerTool(
               symbolQueryParam: symbol,
               begin: raw.begin,
               end: raw.end,
+              note: cumulativeApplied
+                ? "velo.xyz's API returns raw per-bar delta for 'Cumulative ...' views - it does not pre-accumulate server-side. This series has been locally cumulatively summed to match what the live chart displays."
+                : undefined,
               series,
             },
             null,

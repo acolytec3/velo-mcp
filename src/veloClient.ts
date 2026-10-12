@@ -205,6 +205,41 @@ export async function fetchRange(args: FetchRangeArgs): Promise<RangeResponse> {
   };
 }
 
+/**
+ * Live-confirmed (2026-10-12): for the `spotvol`/`volume` metrics, the
+ * `view` segment of the compound symbol ("Delta" vs. "Cumulative Delta" vs.
+ * "Cumulative Delta (Candles)") does NOT change what `/api/m/range` returns
+ * - all three come back as identical raw per-bar delta values (width-2
+ * rows). The running-total line shown on the live chart for "Cumulative
+ * Delta" is accumulated client-side by the TradingView study, not by the
+ * API. If you want data that actually matches what the chart displays for a
+ * "Cumulative ..." view, you must sum it yourself - that's what this does.
+ */
+export function isCumulativeView(view: string): boolean {
+  return /cumulative/i.test(view);
+}
+
+/** Running sum of a Point series' `value` field, left-to-right (oldest to
+ * newest, same ordering `fetchRange`/`normalizeRows` already produce). */
+export function cumulativeSum(points: Point[]): Point[] {
+  let running = 0;
+  return points.map((p) => {
+    running += p.value;
+    return { ...p, value: running };
+  });
+}
+
+/**
+ * Applies `cumulativeSum` to `series` when `view` names a "Cumulative ..."
+ * style and the series is a flat Point series (width-2 rows) rather than
+ * already-structured candles. No-op otherwise.
+ */
+export function applyCumulativeIfRequested(series: Candle[] | Point[], view: string): Candle[] | Point[] {
+  if (!isCumulativeView(view)) return series;
+  if (series.length === 0 || !("value" in series[0])) return series; // already candles; nothing to do
+  return cumulativeSum(series as Point[]);
+}
+
 /** Normalizes the raw `arr` rows into typed candles (5-6 columns) or plain
  * time/value points (2 columns), based on row width. */
 export function normalizeRows(arr: number[][]): Candle[] | Point[] {
