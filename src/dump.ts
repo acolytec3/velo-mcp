@@ -44,6 +44,7 @@ interface ParsedArgs {
   ticker: string;
   timeframe: Timeframe;
   lookback: string;
+  end?: string;
   indicator?: string;
   view?: string;
   unit: Unit;
@@ -59,7 +60,7 @@ function printUsageAndExit(message?: string): never {
   if (message) console.error(`Error: ${message}\n`);
   console.error(`Usage:
   npm run dump -- --ticker <TICKER> --timeframe <1m|5m|15m|1h|4h|1d> --lookback <duration|ISO date> \\
-    [--indicator <name-or-metric>] [--view <view>] [--unit Dollars|Coins] \\
+    [--end <ISO date|epoch ms>] [--indicator <name-or-metric>] [--view <view>] [--unit Dollars|Coins] \\
     [--exchange <anchor-exchange>] [--exchanges ex1,ex2,...] [--format csv|json] [--out <path>] \\
     [--concurrency <n>] [--delay-ms <n>]
 
@@ -70,6 +71,11 @@ rate limit on large backfills.
 
 --lookback accepts "<number><unit>" with unit in {h, d, w, mo, y} (e.g. "90d", "6mo", "1y"),
 or a plain ISO date (e.g. "2024-01-01") to use as the begin time directly.
+
+--end optionally sets the range's end time (ISO date or epoch ms); defaults to now. Combine
+with --lookback (a duration, not an absolute date) to window an arbitrary historical range,
+e.g. for backfills that exceed the ~22,500-bar single-call cap: step --end backwards and keep
+--lookback fixed to fetch consecutive non-overlapping windows.
 
 --indicator accepts either a catalog display name ("Aggregated Open Interest"),
 a study id ("aggregated-open-interest"), or a raw metric key (${ALL_METRICS.join(", ")}).
@@ -124,6 +130,7 @@ function parseArgs(argv: string[]): ParsedArgs {
     ticker,
     timeframe: timeframe as Timeframe,
     lookback,
+    end: map.get("end"),
     indicator: map.get("indicator"),
     view: map.get("view"),
     unit: (map.get("unit") as Unit) || "Dollars",
@@ -196,7 +203,13 @@ function toCsv(rows: (Candle | Point)[]): string {
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
-  const endMs = Date.now();
+  const endMs = args.end !== undefined ? (() => {
+    const parsed = Date.parse(args.end!);
+    if (!Number.isNaN(parsed)) return parsed;
+    const asNumber = Number(args.end);
+    if (!Number.isNaN(asNumber)) return asNumber;
+    throw new Error(`Could not parse --end "${args.end}". Use an ISO date or epoch ms.`);
+  })() : Date.now();
   const beginMs = parseLookbackToBeginMs(args.lookback, endMs);
   if (beginMs >= endMs) printUsageAndExit(`--lookback "${args.lookback}" resolves to a begin time in the future`);
 
