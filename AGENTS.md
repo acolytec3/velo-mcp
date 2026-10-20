@@ -16,8 +16,9 @@ src/
                  # you discover/confirm new API behavior.
   veloClient.ts  # fetchRange() (auto-paginating HTTP client), buildCompoundSymbol(),
                  # normalizeRows() (shapes raw arr rows into Candle|Point).
-  index.ts       # MCP server (@modelcontextprotocol/server v2) — 3 tools:
-                 # velo_list_indicators, velo_get_price, velo_get_indicator.
+  index.ts       # MCP server (@modelcontextprotocol/server v2) — 4 tools:
+                 # velo_list_indicators, velo_get_price, velo_get_indicator,
+                 # velo_get_heatmap_levels.
   dump.ts        # Standalone CLI (`npm run dump --`) for one-off data pulls to
                  # CSV/JSON. Reuses catalog.ts/veloClient.ts — do not duplicate
                  # logic here; if you need new shared behavior, put it in
@@ -79,6 +80,21 @@ Data has a hard floor at **`2021-01-01T00:00:00Z`**, confirmed identical across 
 ### Verification status — be honest about what's untested
 
 Live-confirmed end-to-end: plain price candles, `open_interest`+`Candles`, `volume`+`Cumulative Delta`, `spotvol`+`Cumulative Delta`, daily (`1D`) resolution, cross-chunk pagination, pre-2021 clamping. Every other metric/view combination in the catalog is inferred from the TradingView study `inputs` metadata (i.e., we know the option exists in the UI) but its actual `arr` response shape hasn't been individually confirmed. If something looks wrong for an untested combo, that's the likely cause — don't assume the code is buggy before checking against the live chart.
+
+### Chart heatmap (`/api/l/levels`) — separate from `/api/m/range`
+
+The price-chart heatmap overlay (orderbook depth; Hyperliquid liquidation/TP/SL
+books) is **`GET /api/l/levels`**, gzip or plain CSV text, **not** the compound
+symbol `/api/m/range` pipeline. Query params: `begin`/`end` (epoch ms), `reso`
+(minute count — daily is `1440`, not `1D`), `spread`, plus either `coin` (aggregated
+orderbook) or `exchange`+`product` (non-orderbook types append `-liqBook`/`-tpBook`/`-slBook`
+to `exchange`). **512-bucket cap** per request (`steps (minutes / reso) > 512` → 403);
+`fetchHeatmapLevels()` in `veloClient.ts` buffers each response fully and auto-chunks.
+Orderbook coverage is the `depth=true` subset of `https://api.velo.xyz/api/v1/futures`
+(12 coins / 32 exchange+product rows as of 2026-10-20 — see `HEATMAP_ORDERBOOK_*` in
+`catalog.ts`). `coin=NEAR` and most alt perps 404. HL liquidation/tp/sl books use
+`hyperliquid-{liqBook|tpBook|slBook}` + hyperliquid product ids (`BTC-USD`, not `BTCUSDT`).
+Live WebSocket updates use `wss://wss.velo.xyz/api/w/connect` — not exposed in MCP yet.
 
 ### Not implemented / out of scope so far
 

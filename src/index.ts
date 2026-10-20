@@ -8,14 +8,29 @@ import {
   INDICATORS,
   TIMEFRAME_TO_MINUTES,
   MAX_BARS_PER_REQUEST,
+  MAX_LEVELS_BUCKETS_PER_REQUEST,
   EARLIEST_AVAILABLE_DATA,
+  HEATMAP_TYPES,
+  HEATMAP_COVERAGE_HINT,
+  HEATMAP_ORDERBOOK_COINS,
+  HEATMAP_ORDERBOOK_PRODUCTS,
+  HEATMAP_HYPERLIQUID_BOOK_PRODUCTS,
+  FUTURES_CATALOG_CSV_URL,
   ALL_METRICS,
   defaultExchangesForMetric,
   defaultViewForMetric,
   type Metric,
   type Unit,
+  type HeatmapType,
 } from "./catalog.js";
-import { buildCompoundSymbol, fetchRange, normalizeRows, applyCumulativeIfRequested, isCumulativeView } from "./veloClient.js";
+import {
+  buildCompoundSymbol,
+  fetchRange,
+  fetchHeatmapLevels,
+  normalizeRows,
+  applyCumulativeIfRequested,
+  isCumulativeView,
+} from "./veloClient.js";
 
 const TIMEFRAMES = Object.keys(TIMEFRAME_TO_MINUTES) as [string, ...string[]];
 const METRICS = ALL_METRICS as [Metric, ...Metric[]];
@@ -44,8 +59,15 @@ server.registerTool(
             },
             earliestAvailableData: EARLIEST_AVAILABLE_DATA,
             maxBarsPerRequest: MAX_BARS_PER_REQUEST,
+            maxLevelsBucketsPerRequest: MAX_LEVELS_BUCKETS_PER_REQUEST,
+            heatmapTypes: HEATMAP_TYPES,
+            heatmapOrderbookCoins: HEATMAP_ORDERBOOK_COINS,
+            heatmapOrderbookProducts: HEATMAP_ORDERBOOK_PRODUCTS,
+            heatmapHyperliquidBookProducts: HEATMAP_HYPERLIQUID_BOOK_PRODUCTS,
+            futuresCatalogCsvUrl: FUTURES_CATALOG_CSV_URL,
+            heatmapCoverageHint: HEATMAP_COVERAGE_HINT,
             notes:
-              "velo_get_price and velo_get_indicator auto-paginate transparently when a requested range exceeds maxBarsPerRequest, up to a safety cap of 50 chunked requests per call. Data does not exist before earliestAvailableData for any exchange/symbol.",
+              "velo_get_price and velo_get_indicator auto-paginate transparently when a requested range exceeds maxBarsPerRequest, up to a safety cap of 50 chunked requests per call. velo_get_heatmap_levels uses GET /api/l/levels (chart overlay history), chunks at maxLevelsBucketsPerRequest (server hard cap 512 buckets), default maxChunks 200. Data does not exist before earliestAvailableData for any exchange/symbol.",
             indicators: INDICATORS,
           },
           null,
@@ -180,6 +202,95 @@ server.registerTool(
                 ? "velo.xyz's API returns raw per-bar delta for 'Cumulative ...' views - it does not pre-accumulate server-side. This series has been locally cumulatively summed to match what the live chart displays."
                 : undefined,
               series,
+            },
+            null,
+            2
+          ),
+        },
+      ],
+    };
+  }
+);
+
+server.registerTool(
+  "velo_get_heatmap_levels",
+  {
+    title: "Get Velo chart heatmap level history",
+    description:
+      "Fetch historical price-level heatmap data used by velo.xyz's chart overlay (orderbook depth, or Hyperliquid liquidation/TP/SL books). Uses GET /api/l/levels — not the /api/m/range indicator API. Each response is fully buffered and parsed server-side (no streaming). Requests longer than ~512 resolution buckets are auto-chunked. " +
+      HEATMAP_COVERAGE_HINT,
+    inputSchema: z.object({
+      heatmapType: z
+        .enum([...HEATMAP_TYPES] as [HeatmapType, ...HeatmapType[]])
+        .default("orderbook")
+        .describe("Chart heatmap layer type."),
+      coin: z
+        .string()
+        .optional()
+        .describe(
+          `Aggregated orderbook only. Valid coins: ${HEATMAP_ORDERBOOK_COINS.join(", ")}. Do not combine with exchange/product.`
+        ),
+      exchange: z
+        .string()
+        .optional()
+        .describe(
+          'Exchange without suffix, e.g. "binance-futures", "hyperliquid". Must match a row in heatmapOrderbookProducts (see velo_list_indicators).'
+        ),
+      product: z
+        .string()
+        .optional()
+        .describe(
+          'Exchange-native symbol, e.g. "BTCUSDT", "BTC-USD", "xyz:GOLD" — not every *USDT perp has heatmaps (NEAR has none).'
+        ),
+      timeframe: z.enum(TIMEFRAMES).default("1h").describe("Bucket size (maps to reso minutes on /api/l/levels)."),
+      spread: z.string().default("10").describe("Price grid step (spread query param; chart default is 10)."),
+      begin: z
+        .union([z.string(), z.number()])
+        .optional()
+        .describe("Range start as ISO date or epoch ms. Defaults to ~300 buckets before end."),
+      end: z
+        .union([z.string(), z.number()])
+        .optional()
+        .describe("Range end as ISO date or epoch ms. Defaults to now."),
+      bin: z.boolean().optional().describe("If true, passes bin=1 (binned levels)."),
+      slow: z.boolean().optional().describe("If true, passes slow=1."),
+      maxChunks: z
+        .number()
+        .int()
+        .positive()
+        .optional()
+        .describe("Safety cap on chunked HTTP requests (default 200). Raise for very long history."),
+    }),
+  },
+  async ({ heatmapType, coin, exchange, product, timeframe, spread, begin, end, bin, slow, maxChunks }) => {
+    const result = await fetchHeatmapLevels({
+      heatmapType,
+      coin,
+      exchange,
+      product,
+      timeframe: timeframe as keyof typeof TIMEFRAME_TO_MINUTES,
+      spread,
+      begin,
+      end,
+      bin,
+      slow,
+      maxChunks,
+    });
+    return {
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify(
+            {
+              heatmapType,
+              target: coin ? { coin } : { exchange, product },
+              timeframe,
+              spread: result.spread,
+              reso: result.reso,
+              begin: result.begin,
+              end: result.end,
+              snapshotCount: result.snapshots.length,
+              snapshots: result.snapshots,
             },
             null,
             2

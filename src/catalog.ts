@@ -58,6 +58,124 @@ export const TIMEFRAME_TO_RESOLUTION_PARAM: Record<Timeframe, string> = {
 export const MAX_BARS_PER_REQUEST = 450;
 
 /**
+ * Live-confirmed (2026-10-20): chart heatmap history (`GET /api/l/levels`)
+ * rejects requests whose `(end - begin) / (reso minutes)` exceeds 512, with
+ * body `steps (minutes / reso) … > 512`. Same cap as the documented
+ * `/api/v1/heatmap` orderbook endpoint. We chunk below that edge.
+ */
+export const MAX_LEVELS_BUCKETS_PER_REQUEST = 500;
+
+/** Minutes sent as the `reso` query param on `/api/l/levels` (plain minute
+ * counts — not the `"1D"` literal used by `/api/m/range`). */
+export const TIMEFRAME_TO_LEVELS_RESO: Record<Timeframe, string> = {
+  "1m": "1",
+  "5m": "5",
+  "15m": "15",
+  "1h": "60",
+  "4h": "240",
+  "1d": "1440",
+};
+
+/** Chart heatmap overlay types (reverse-engineered from the heatmap plugin
+ * bundle). `liquidation` / `tp` / `sl` use Hyperliquid book suffixes and are
+ * not aggregated across `coin=`. */
+export const HEATMAP_TYPES = ["orderbook", "liquidation", "tp", "sl"] as const;
+export type HeatmapType = (typeof HEATMAP_TYPES)[number];
+
+/** Appended to the base exchange id in `exchange` when type !== orderbook. */
+export const HEATMAP_EXCHANGE_SUFFIX: Record<HeatmapType, string> = {
+  orderbook: "",
+  liquidation: "-liqBook",
+  tp: "-tpBook",
+  sl: "-slBook",
+};
+
+export const DEFAULT_HEATMAP_SPREAD = "10";
+
+/**
+ * Public futures catalog (CSV). Rows with `depth=true` are the products Velo
+ * stores orderbook heatmap history for — same set as `/api/l/levels` and
+ * `/api/v1/heatmap`. Live-synced 2026-10-20; re-fetch this URL if heatmaps 404.
+ */
+export const FUTURES_CATALOG_CSV_URL = "https://api.velo.xyz/api/v1/futures";
+
+export interface HeatmapOrderbookProduct {
+  exchange: string;
+  coin: string;
+  product: string;
+}
+
+/** Velo `depth: true` futures rows (32 products, 12 coins) as of 2026-10-20. */
+export const HEATMAP_ORDERBOOK_PRODUCTS: HeatmapOrderbookProduct[] = [
+  { exchange: "hyperliquid", coin: "BRENTOIL", product: "xyz:BRENTOIL" },
+  { exchange: "binance-futures", coin: "BTC", product: "BTCUSDT" },
+  { exchange: "bybit", coin: "BTC", product: "BTCUSDT" },
+  { exchange: "hyperliquid", coin: "BTC", product: "BTC-USD" },
+  { exchange: "okex-swap", coin: "BTC", product: "BTC-USDT-SWAP" },
+  { exchange: "binance-futures", coin: "CL", product: "CLUSDT" },
+  { exchange: "bybit", coin: "CL", product: "CLUSDT" },
+  { exchange: "hyperliquid", coin: "CL", product: "xyz:CL" },
+  { exchange: "binance-futures", coin: "ETH", product: "ETHUSDT" },
+  { exchange: "bybit", coin: "ETH", product: "ETHUSDT" },
+  { exchange: "hyperliquid", coin: "ETH", product: "ETH-USD" },
+  { exchange: "okex-swap", coin: "ETH", product: "ETH-USDT-SWAP" },
+  { exchange: "binance-futures", coin: "HYPE", product: "HYPEUSDT" },
+  { exchange: "bybit", coin: "HYPE", product: "HYPEUSDT" },
+  { exchange: "hyperliquid", coin: "HYPE", product: "HYPE-USD" },
+  { exchange: "binance-futures", coin: "SOL", product: "SOLUSDT" },
+  { exchange: "bybit", coin: "SOL", product: "SOLUSDT" },
+  { exchange: "hyperliquid", coin: "SOL", product: "SOL-USD" },
+  { exchange: "okex-swap", coin: "SOL", product: "SOL-USDT-SWAP" },
+  { exchange: "hyperliquid", coin: "SP500", product: "xyz:SP500" },
+  { exchange: "hyperliquid", coin: "SPCX", product: "xyz:SPCX" },
+  { exchange: "binance-futures", coin: "XAG", product: "XAGUSDT" },
+  { exchange: "bybit", coin: "XAG", product: "XAGUSDT" },
+  { exchange: "hyperliquid", coin: "XAG", product: "xyz:SILVER" },
+  { exchange: "binance-futures", coin: "XAU", product: "XAUUSDT" },
+  { exchange: "bybit", coin: "XAU", product: "XAUUSDT" },
+  { exchange: "hyperliquid", coin: "XAU", product: "xyz:GOLD" },
+  { exchange: "binance-futures", coin: "XRP", product: "XRPUSDT" },
+  { exchange: "bybit", coin: "XRP", product: "XRPUSDT" },
+  { exchange: "hyperliquid", coin: "XRP", product: "XRP-USD" },
+  { exchange: "okex-swap", coin: "XRP", product: "XRP-USDT-SWAP" },
+  { exchange: "hyperliquid", coin: "XYZ100", product: "xyz:XYZ100" },
+];
+
+/** Coins with aggregated orderbook heatmap (`coin=` on `/api/l/levels`). */
+export const HEATMAP_ORDERBOOK_COINS: readonly string[] = [
+  ...new Set(HEATMAP_ORDERBOOK_PRODUCTS.map((p) => p.coin)),
+].sort();
+
+/** Hyperliquid products that support liquidation/tp/sl book heatmaps
+ * (`exchange=hyperliquid-{liqBook|tpBook|slBook}`, same `product` ids). */
+export const HEATMAP_HYPERLIQUID_BOOK_PRODUCTS: readonly string[] = HEATMAP_ORDERBOOK_PRODUCTS
+  .filter((p) => p.exchange === "hyperliquid")
+  .map((p) => p.product);
+
+/** Short hint for MCP tool descriptions and errors. */
+export const HEATMAP_COVERAGE_HINT =
+  "Orderbook heatmap history exists only for Velo catalog coins with depth=true: " +
+  `${HEATMAP_ORDERBOOK_COINS.join(", ")} (not NEAR, DOGE, etc.). ` +
+  `Use coin= for aggregated orderbook, or exchange+product from HEATMAP_ORDERBOOK_PRODUCTS in catalog.ts / ${FUTURES_CATALOG_CSV_URL}. ` +
+  "liquidation/tp/sl heatmaps: Hyperliquid only — use exchange hyperliquid and the hyperliquid product id (e.g. BTC-USD, xyz:GOLD), not *USDT perps.";
+
+export function findHeatmapOrderbookProducts(filter?: {
+  coin?: string;
+  exchange?: string;
+  product?: string;
+}): HeatmapOrderbookProduct[] {
+  const coin = filter?.coin?.toUpperCase();
+  const exchange = filter?.exchange?.toLowerCase();
+  const product = filter?.product;
+  return HEATMAP_ORDERBOOK_PRODUCTS.filter((row) => {
+    if (coin && row.coin !== coin) return false;
+    if (exchange && row.exchange !== exchange) return false;
+    if (product && row.product !== product) return false;
+    return true;
+  });
+}
+
+/**
  * Live-confirmed via binary search (2026-10-12): historical data has a hard
  * floor at 2021-01-01T00:00:00Z across every exchange tested (Binance,
  * Bybit, OKX, Deribit, Coinbase) - it does not taper off gradually, it just

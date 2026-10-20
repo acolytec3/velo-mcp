@@ -1,14 +1,25 @@
+import { gunzipSync } from "node:zlib";
+
 import {
   TIMEFRAME_TO_MINUTES,
   TIMEFRAME_TO_RESOLUTION_PARAM,
+  TIMEFRAME_TO_LEVELS_RESO,
   MAX_BARS_PER_REQUEST,
+  MAX_LEVELS_BUCKETS_PER_REQUEST,
   EARLIEST_AVAILABLE_DATA,
+  HEATMAP_EXCHANGE_SUFFIX,
+  DEFAULT_HEATMAP_SPREAD,
+  HEATMAP_COVERAGE_HINT,
+  HEATMAP_ORDERBOOK_COINS,
+  findHeatmapOrderbookProducts,
   Timeframe,
   Unit,
   Metric,
+  HeatmapType,
 } from "./catalog.js";
 
 const RANGE_URL = "https://velo.xyz/api/m/range";
+const LEVELS_URL = "https://velo.xyz/api/l/levels";
 
 export interface RangeResponse {
   begin: string;
@@ -242,6 +253,279 @@ export function applyCumulativeIfRequested(series: Candle[] | Point[], view: str
 
 /** Normalizes the raw `arr` rows into typed candles (5-6 columns) or plain
  * time/value points (2 columns), based on row width. */
+export interface HeatmapLevel {
+  price: number;
+  size: number;
+}
+
+export interface HeatmapSnapshot {
+  timeMs: number;
+  timeISO: string;
+  midPrice: number;
+  levels: HeatmapLevel[];
+}
+
+function decodeLevelsBody(bytes: Uint8Array): string {
+  if (bytes.length >= 2 && bytes[0] === 0x1f && bytes[1] === 0x8b) {
+    return gunzipSync(bytes).toString("utf8");
+  }
+  return Buffer.from(bytes).toString("utf8");
+}
+
+/** Parses the text body of `/api/l/levels` (after gunzip if needed). Skips
+ * single-field header lines the stream sometimes prefixes batches with. */
+export function parseLevelsText(text: string): HeatmapSnapshot[] {
+  const snapshots: HeatmapSnapshot[] = [];
+  for (const rawLine of text.split("\n")) {
+    const line = rawLine.trim();
+    if (!line) continue;
+    const parts = line.split(",");
+    if (parts.length === 1 && /^\d+$/.test(parts[0])) continue;
+    if (parts.length < 3) continue;
+
+    const timeMs = Number(parts[0]);
+    const midPrice = Number(parts[1]);
+    if (!Number.isFinite(timeMs) || !Number.isFinite(midPrice)) continue;
+
+    const levels: HeatmapLevel[] = [];
+    for (let i = 2; i + 1 < parts.length; i += 2) {
+      const price = Number(parts[i]);
+      const size = Number(parts[i + 1]);
+      if (!Number.isFinite(price) || !Number.isFinite(size)) continue;
+      levels.push({ price, size });
+    }
+    snapshots.push({
+      timeMs,
+      timeISO: new Date(timeMs).toISOString(),
+      midPrice,
+      levels,
+    });
+  }
+  return snapshots;
+}
+
+export interface FetchHeatmapLevelsArgs {
+  heatmapType?: HeatmapType;
+  /** Aggregated futures orderbook across venues (orderbook type only). */
+  coin?: string;
+  /** Base exchange id without heatmap suffix, e.g. `binance-futures`. */
+  exchange?: string;
+  /** Native product symbol, e.g. `BTCUSDT`. */
+  product?: string;
+  timeframe: Timeframe;
+  begin?: number | string;
+  end?: number | string;
+  defaultBars?: number;
+  spread?: string;
+  bin?: boolean;
+  slow?: boolean;
+  /** Max time buckets per HTTP request (server hard cap 512). */
+  maxBucketsPerRequest?: number;
+  maxChunks?: number;
+  concurrency?: number;
+  requestDelayMs?: number;
+}
+
+function levelsBucketMs(resoMinutes: number): number {
+  return resoMinutes * 60_000;
+}
+
+function alignLevelsRange(beginMs: number, endMs: number, bucketMs: number): { beginMs: number; endMs: number } {
+  return {
+    beginMs: Math.floor(beginMs / bucketMs) * bucketMs,
+    endMs: Math.ceil(endMs / bucketMs) * bucketMs,
+  };
+}
+
+async function fetchSingleLevels(args: {
+  heatmapType: HeatmapType;
+  coin?: string;
+  exchange?: string;
+  product?: string;
+  reso: string;
+  spread: string;
+  beginMs: number;
+  endMs: number;
+  bin?: boolean;
+  slow?: boolean;
+}): Promise<HeatmapSnapshot[]> {
+  const url = new URL(LEVELS_URL);
+  if (args.coin) {
+    url.searchParams.set("coin", args.coin);
+  } else if (args.exchange && args.product) {
+    const suffix = HEATMAP_EXCHANGE_SUFFIX[args.heatmapType];
+    url.searchParams.set("exchange", args.exchange.toLowerCase() + suffix);
+    url.searchParams.set("product", args.product);
+  } else {
+    throw new Error("fetchSingleLevels requires either `coin` or (`exchange` and `product`).");
+  }
+  url.searchParams.set("begin", String(args.beginMs));
+  url.searchParams.set("end", String(args.endMs));
+  url.searchParams.set("reso", args.reso);
+  url.searchParams.set("spread", args.spread);
+  if (args.bin) url.searchParams.set("bin", "1");
+  if (args.slow) url.searchParams.set("slow", "1");
+
+  const res = await fetch(url.toString());
+  const bytes = new Uint8Array(await res.arrayBuffer());
+  if (!res.ok) {
+    const body = decodeLevelsBody(bytes).slice(0, 500);
+    throw new Error(`Velo levels API failed (${res.status} ${res.statusText}) for ${url.toString()}: ${body}`);
+  }
+  return parseLevelsText(decodeLevelsBody(bytes));
+}
+
+/**
+ * Fetches chart heatmap level history from `GET /api/l/levels`, buffering each
+ * HTTP response fully (no streaming to callers) and auto-chunking when the
+ * requested window exceeds the live-confirmed 512-bucket server cap.
+ */
+export async function fetchHeatmapLevels(args: FetchHeatmapLevelsArgs): Promise<{
+  begin: string;
+  end: string;
+  reso: string;
+  spread: string;
+  heatmapType: HeatmapType;
+  snapshots: HeatmapSnapshot[];
+}> {
+  const heatmapType = args.heatmapType ?? "orderbook";
+  const reso = TIMEFRAME_TO_LEVELS_RESO[args.timeframe];
+  const resoMinutes = TIMEFRAME_TO_MINUTES[args.timeframe];
+  if (!reso || !resoMinutes) {
+    throw new Error(
+      `Unknown timeframe "${args.timeframe}". Valid: ${Object.keys(TIMEFRAME_TO_MINUTES).join(", ")}`
+    );
+  }
+
+  const hasCoin = Boolean(args.coin);
+  const hasVenue = Boolean(args.exchange && args.product);
+  if (hasCoin === hasVenue) {
+    throw new Error("Provide exactly one target: `coin` (aggregated) or both `exchange` and `product`.");
+  }
+  if (hasCoin && heatmapType !== "orderbook") {
+    throw new Error(`Aggregated coin= requests only support heatmapType=orderbook (got ${heatmapType}).`);
+  }
+
+  if (hasCoin) {
+    const normalizedCoin = args.coin!.toUpperCase();
+    if (!HEATMAP_ORDERBOOK_COINS.includes(normalizedCoin)) {
+      throw new Error(
+        `No orderbook heatmap for coin=${normalizedCoin}. ${HEATMAP_COVERAGE_HINT}`
+      );
+    }
+  } else if (hasVenue) {
+    const matches = findHeatmapOrderbookProducts({
+      exchange: args.exchange,
+      product: args.product,
+    });
+    if (heatmapType === "orderbook" && matches.length === 0) {
+      throw new Error(
+        `No orderbook heatmap for ${args.exchange} + ${args.product}. ${HEATMAP_COVERAGE_HINT}`
+      );
+    }
+    if (heatmapType !== "orderbook") {
+      const ex = args.exchange!.toLowerCase();
+      if (ex !== "hyperliquid") {
+        throw new Error(
+          `heatmapType=${heatmapType} is only supported on hyperliquid (got ${args.exchange}). ${HEATMAP_COVERAGE_HINT}`
+        );
+      }
+      const hl = findHeatmapOrderbookProducts({ exchange: "hyperliquid", product: args.product });
+      if (hl.length === 0) {
+        throw new Error(
+          `No Hyperliquid heatmap book for product ${args.product}. ${HEATMAP_COVERAGE_HINT}`
+        );
+      }
+    }
+  }
+
+  const spread = args.spread ?? DEFAULT_HEATMAP_SPREAD;
+  const now = Date.now();
+  const endMs = toEpochMs(args.end, now);
+  const defaultBars = args.defaultBars ?? 300;
+  let beginMs = toEpochMs(args.begin, endMs - levelsBucketMs(resoMinutes) * defaultBars);
+
+  const earliestMs = Date.parse(EARLIEST_AVAILABLE_DATA);
+  if (beginMs < earliestMs) beginMs = earliestMs;
+
+  const bucketMs = levelsBucketMs(resoMinutes);
+  const aligned = alignLevelsRange(beginMs, endMs, bucketMs);
+  beginMs = aligned.beginMs;
+  const alignedEndMs = aligned.endMs;
+
+  if (beginMs >= alignedEndMs) {
+    return {
+      begin: new Date(beginMs).toISOString(),
+      end: new Date(alignedEndMs).toISOString(),
+      reso,
+      spread,
+      heatmapType,
+      snapshots: [],
+    };
+  }
+
+  const maxBuckets = args.maxBucketsPerRequest ?? MAX_LEVELS_BUCKETS_PER_REQUEST;
+  const chunkMs = maxBuckets * bucketMs;
+  const totalMs = alignedEndMs - beginMs;
+  const numChunks = Math.max(1, Math.ceil(totalMs / chunkMs));
+
+  const maxChunks = args.maxChunks ?? 200;
+  if (numChunks > maxChunks) {
+    throw new Error(
+      `Requested heatmap range (${new Date(beginMs).toISOString()} .. ${new Date(alignedEndMs).toISOString()}) at ${args.timeframe} ` +
+        `would require ${numChunks} chunked requests (cap: ${maxChunks}, ~${maxBuckets} buckets/request). ` +
+        `Narrow begin/end, use a coarser timeframe, or raise maxChunks.`
+    );
+  }
+
+  const windows: Array<{ begin: number; end: number }> = [];
+  for (let i = 0; i < numChunks; i++) {
+    const cBegin = beginMs + i * chunkMs;
+    const cEnd = Math.min(beginMs + (i + 1) * chunkMs, alignedEndMs);
+    windows.push({ begin: cBegin, end: cEnd });
+  }
+
+  const concurrency = Math.max(1, args.concurrency ?? 3);
+  const requestDelayMs = args.requestDelayMs ?? 0;
+  const chunkResults: HeatmapSnapshot[][] = new Array(windows.length);
+
+  let nextIndex = 0;
+  async function worker() {
+    while (nextIndex < windows.length) {
+      const i = nextIndex++;
+      chunkResults[i] = await fetchSingleLevels({
+        heatmapType,
+        coin: args.coin,
+        exchange: args.exchange,
+        product: args.product,
+        reso,
+        spread,
+        beginMs: windows[i].begin,
+        endMs: windows[i].end,
+        bin: args.bin,
+        slow: args.slow,
+      });
+      if (requestDelayMs > 0 && nextIndex < windows.length) await sleep(requestDelayMs);
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(concurrency, windows.length) }, worker));
+
+  const byTime = new Map<number, HeatmapSnapshot>();
+  for (const chunk of chunkResults) {
+    for (const snap of chunk) byTime.set(snap.timeMs, snap);
+  }
+  const snapshots = Array.from(byTime.values()).sort((a, b) => a.timeMs - b.timeMs);
+
+  return {
+    begin: new Date(beginMs).toISOString(),
+    end: new Date(alignedEndMs).toISOString(),
+    reso,
+    spread,
+    heatmapType,
+    snapshots,
+  };
+}
+
 export function normalizeRows(arr: number[][]): Candle[] | Point[] {
   if (arr.length === 0) return [];
   const width = arr[0].length;
