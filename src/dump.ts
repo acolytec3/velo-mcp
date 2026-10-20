@@ -15,6 +15,7 @@
  *   npm run dump -- --ticker NEARUSDT --timeframe 1h --lookback 1y --indicator volume --view "Cumulative Delta" --unit Coins
  *   npm run dump -- --ticker NEARUSDT --timeframe 5m --lookback 2d --indicator premium --exchange coinbase
  *   npm run dump -- --list-indicators
+ *   npm run dump -- --orderflow --ticker NEARUSDT --timeframe 5m --lookback 7d --format json
  */
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
@@ -39,8 +40,10 @@ import {
   type Candle,
   type Point,
 } from "./veloClient.js";
+import { fetchOrderflowPanel } from "./orderflow.js";
 
 interface ParsedArgs {
+  orderflow?: boolean;
   ticker: string;
   timeframe: Timeframe;
   lookback: string;
@@ -54,6 +57,9 @@ interface ParsedArgs {
   out?: string;
   concurrency: number;
   delayMs: number;
+  includeSpot: boolean;
+  includeFunding: boolean;
+  includeOpenInterest: boolean;
 }
 
 function printUsageAndExit(message?: string): never {
@@ -62,7 +68,10 @@ function printUsageAndExit(message?: string): never {
   npm run dump -- --ticker <TICKER> --timeframe <1m|5m|15m|1h|4h|1d> --lookback <duration|ISO date> \\
     [--end <ISO date|epoch ms>] [--indicator <name-or-metric>] [--view <view>] [--unit Dollars|Coins] \\
     [--exchange <anchor-exchange>] [--exchanges ex1,ex2,...] [--format csv|json] [--out <path>] \\
-    [--concurrency <n>] [--delay-ms <n>]
+    [--concurrency <n>] [--delay-ms <n>] [--orderflow] [--no-spot] [--no-funding] [--no-oi]
+
+--orderflow dumps an aligned order-flow panel (price + volume/tape/liquidations/OI/funding[/spot])
+as JSON or CSV-friendly JSON only (--format json recommended). Incompatible with --indicator.
 
 --concurrency (default 5) caps how many chunk requests run in parallel when a range
 needs pagination. --delay-ms (default 0) adds a pause after each chunk completes before
@@ -88,6 +97,7 @@ Examples:
   npm run dump -- --ticker NEARUSDT --timeframe 5m --lookback 2d --indicator premium --exchange coinbase
   npm run dump -- --ticker BTCUSDT --timeframe 5m --lookback 1mo --indicator "Aggregated Spot Volume" --concurrency 1 --delay-ms 1000
   npm run dump -- --list-indicators
+  npm run dump -- --orderflow --ticker NEARUSDT --timeframe 5m --lookback 7d --format json
 `);
   process.exit(1);
 }
@@ -123,10 +133,14 @@ function parseArgs(argv: string[]): ParsedArgs {
     printUsageAndExit(`--timeframe is required and must be one of ${Object.keys(TIMEFRAME_TO_MINUTES).join(", ")}`);
   }
   if (!lookback) printUsageAndExit("--lookback is required (e.g. 30d, 6mo, 1y, or an ISO date)");
+  if (map.has("orderflow") && map.has("indicator")) {
+    printUsageAndExit("--orderflow cannot be combined with --indicator");
+  }
 
   const exchangesRaw = map.get("exchanges");
 
   return {
+    orderflow: map.has("orderflow"),
     ticker,
     timeframe: timeframe as Timeframe,
     lookback,
@@ -140,6 +154,9 @@ function parseArgs(argv: string[]): ParsedArgs {
     out: map.get("out"),
     concurrency: map.has("concurrency") ? parseInt(map.get("concurrency")!, 10) : 5,
     delayMs: map.has("delay-ms") ? parseInt(map.get("delay-ms")!, 10) : 0,
+    includeSpot: !map.has("no-spot"),
+    includeFunding: !map.has("no-funding"),
+    includeOpenInterest: !map.has("no-oi"),
   };
 }
 
@@ -212,6 +229,36 @@ async function main() {
   })() : Date.now();
   const beginMs = parseLookbackToBeginMs(args.lookback, endMs);
   if (beginMs >= endMs) printUsageAndExit(`--lookback "${args.lookback}" resolves to a begin time in the future`);
+
+  if (args.orderflow) {
+    if (args.format !== "json") {
+      console.error("Note: --orderflow output is JSON-shaped; forcing --format json.");
+    }
+    console.error(
+      `Fetching order-flow panel for ${args.ticker} @ ${args.timeframe} ` +
+        `from ${new Date(beginMs).toISOString()} to ${new Date(endMs).toISOString()}...`
+    );
+    const panel = await fetchOrderflowPanel({
+      ticker: args.ticker,
+      timeframe: args.timeframe,
+      begin: beginMs,
+      end: endMs,
+      unit: args.unit,
+      priceExchange: args.exchange,
+      exchanges: args.exchanges,
+      includeSpot: args.includeSpot,
+      includeFunding: args.includeFunding,
+      includeOpenInterest: args.includeOpenInterest,
+      concurrency: args.concurrency,
+      requestDelayMs: args.delayMs,
+    });
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    const outPath = resolve(args.out || `dumps/velo-${args.ticker}-orderflow-${args.timeframe}-${stamp}.json`);
+    mkdirSync(dirname(outPath), { recursive: true });
+    writeFileSync(outPath, JSON.stringify(panel, null, 2));
+    console.error(`Wrote ${panel.barCount} bars to ${outPath}`);
+    return;
+  }
 
   let symbol: string;
   let exchangesUsed: readonly string[] | undefined;

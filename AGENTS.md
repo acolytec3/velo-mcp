@@ -16,9 +16,10 @@ src/
                  # you discover/confirm new API behavior.
   veloClient.ts  # fetchRange() (auto-paginating HTTP client), buildCompoundSymbol(),
                  # normalizeRows() (shapes raw arr rows into Candle|Point).
-  index.ts       # MCP server (@modelcontextprotocol/server v2) — 4 tools:
+  index.ts       # MCP server (@modelcontextprotocol/server v2) — 5 tools:
                  # velo_list_indicators, velo_get_price, velo_get_indicator,
-                 # velo_get_heatmap_levels.
+                 # velo_get_heatmap_levels, velo_get_orderflow_panel.
+  orderflow.ts   # fetchOrderflowPanel() — aligned bar-level flow metrics.
   dump.ts        # Standalone CLI (`npm run dump --`) for one-off data pulls to
                  # CSV/JSON. Reuses catalog.ts/veloClient.ts — do not duplicate
                  # logic here; if you need new shared behavior, put it in

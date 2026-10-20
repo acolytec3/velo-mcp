@@ -31,6 +31,7 @@ import {
   applyCumulativeIfRequested,
   isCumulativeView,
 } from "./veloClient.js";
+import { fetchOrderflowPanel } from "./orderflow.js";
 
 const TIMEFRAMES = Object.keys(TIMEFRAME_TO_MINUTES) as [string, ...string[]];
 const METRICS = ALL_METRICS as [Metric, ...Metric[]];
@@ -67,7 +68,7 @@ server.registerTool(
             futuresCatalogCsvUrl: FUTURES_CATALOG_CSV_URL,
             heatmapCoverageHint: HEATMAP_COVERAGE_HINT,
             notes:
-              "velo_get_price and velo_get_indicator auto-paginate transparently when a requested range exceeds maxBarsPerRequest, up to a safety cap of 50 chunked requests per call. velo_get_heatmap_levels uses GET /api/l/levels (chart overlay history), chunks at maxLevelsBucketsPerRequest (server hard cap 512 buckets), default maxChunks 200. Data does not exist before earliestAvailableData for any exchange/symbol.",
+              "velo_get_price and velo_get_indicator auto-paginate transparently when a requested range exceeds maxBarsPerRequest, up to a safety cap of 50 chunked requests per call. velo_get_orderflow_panel issues multiple parallel range queries (price + volume/tape/liquidations/OI/funding/spot) aligned on bar time. velo_get_heatmap_levels uses GET /api/l/levels (chart overlay history), chunks at maxLevelsBucketsPerRequest (server hard cap 512 buckets), default maxChunks 200. Data does not exist before earliestAvailableData for any exchange/symbol.",
             indicators: INDICATORS,
           },
           null,
@@ -297,6 +298,83 @@ server.registerTool(
           ),
         },
       ],
+    };
+  }
+);
+
+server.registerTool(
+  "velo_get_orderflow_panel",
+  {
+    title: "Get aligned order-flow panel",
+    description:
+      "Fetch a single time-aligned bar panel for order-flow analysis: OHLCV (anchor exchange) plus aggregated derivatives volume (standard, delta, cumulative delta), tape (trade count, trade delta, cumulative trade delta), liquidations, open interest (close of OI candles), funding (average), and optional spot volume. Adds derived avgTradeNotional and liquidationToVolumeRatio per bar. Not a footprint — no per-price trade data. Cumulative delta views are summed locally to match the chart.",
+    inputSchema: z.object({
+      ticker: z.string().describe('Instrument symbol, e.g. "NEARUSDT", "BTCUSDT".'),
+      timeframe: z.enum(TIMEFRAMES).default("5m").describe("Bar size for all series."),
+      begin: z
+        .union([z.string(), z.number()])
+        .optional()
+        .describe("Range start (ISO or epoch ms). Defaults to ~300 bars before end."),
+      end: z
+        .union([z.string(), z.number()])
+        .optional()
+        .describe("Range end (ISO or epoch ms). Defaults to now."),
+      unit: z.enum(UNITS).default("Dollars").describe("Dollars or Coins for metric series."),
+      priceExchange: z
+        .string()
+        .default("binance-futures")
+        .describe("Exchange for plain OHLCV candles."),
+      exchanges: z
+        .array(z.string())
+        .optional()
+        .describe("Derivatives venues for aggregated metrics; defaults to the standard 8-exchange set."),
+      includeSpot: z.boolean().default(true).describe("Include aggregated spot volume and spot delta."),
+      includeFunding: z.boolean().default(true).describe("Include aggregated average funding rate."),
+      includeOpenInterest: z.boolean().default(true).describe("Include aggregated OI (close of OI candle bars)."),
+      includeHeatmapSnapshot: z
+        .boolean()
+        .default(false)
+        .describe(
+          "If true, attach the latest 1h orderbook heatmap snapshot when the ticker coin is in the depth catalog (not bar-aligned)."
+        ),
+      maxChunks: z
+        .number()
+        .int()
+        .positive()
+        .optional()
+        .describe("Per-series pagination cap (each internal fetchRange call). Default 50."),
+    }),
+  },
+  async ({
+    ticker,
+    timeframe,
+    begin,
+    end,
+    unit,
+    priceExchange,
+    exchanges,
+    includeSpot,
+    includeFunding,
+    includeOpenInterest,
+    includeHeatmapSnapshot,
+    maxChunks,
+  }) => {
+    const panel = await fetchOrderflowPanel({
+      ticker,
+      timeframe: timeframe as keyof typeof TIMEFRAME_TO_MINUTES,
+      begin,
+      end,
+      unit: unit as Unit,
+      priceExchange,
+      exchanges,
+      includeSpot,
+      includeFunding,
+      includeOpenInterest,
+      includeHeatmapSnapshot,
+      maxChunks,
+    });
+    return {
+      content: [{ type: "text", text: JSON.stringify(panel, null, 2) }],
     };
   }
 );
